@@ -338,6 +338,21 @@ Use "monitor" to view the serial output. Use "Ctrl + [" to exit.
 west espressif monitor 
 ```
 
+
+Use "menuconfig" to configure the application
+
+```bash
+west build -d build\esp32s3_demo -t guiconfig
+```
+
+Minimal defconfig export
+
+```bash
+west build -d build\esp32s3_demo -t savedefconfig
+```
+
+This generates build\esp32s3_demo\zephyr\defconfig (a minimal set of CONFIG_ lines). You can copy its contents into prj.conf (or a board .conf) as a clean baseline.
+
 #### Also Noteworthy
 
   - esp32s3_demo/sample.yaml:1 — Twister/CI metadata for building/testing the sample; defines variants and an optional
