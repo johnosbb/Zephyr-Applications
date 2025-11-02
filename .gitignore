@@ -1,0 +1,22 @@
+# Build trees anywhere
+build/
+**/build/
+**/zephyr/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/compile_commands.json
+
+# Binaries & intermediates
+**/*.elf
+**/*.bin
+**/*.hex
+**/*.map
+**/*.log
+**/*.dts
+**/*.dtb
+**/.config
+
+# Python venv, IDE
+.venv/
+.vscode/
