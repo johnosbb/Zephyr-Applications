@@ -1,3 +1,5 @@
+name: Build esp32s3_demo
+
 on:
   push:
     paths:
@@ -6,3 +8,38 @@ on:
   pull_request:
     paths:
       - 'applications/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ghcr.io/zephyrproject-rtos/ci:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init west workspace (use this repo as manifest)
+        run: |
+          mkdir -p ws
+          cd ws
+          west init -l $GITHUB_WORKSPACE/applications
+          west update
+
+      - name: Build esp32s3_demo
+        working-directory: ws
+        run: |
+          west build -p always \
+            -b esp32s3_devkitc/esp32s3/procpu \
+            -d build/esp32s3_demo \
+            applications/apps/esp32s3_demo \
+            -- "-DDTC_OVERLAY_FILE=boards/esp32s3_devkitc.overlay"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3_demo
+          path: |
+            ws/build/esp32s3_demo/zephyr/zephyr.elf
+            ws/build/esp32s3_demo/zephyr/zephyr.bin
+            ws/build/esp32s3_demo/zephyr/.config
