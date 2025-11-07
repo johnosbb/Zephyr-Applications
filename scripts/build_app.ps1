@@ -28,10 +28,11 @@ if ($Clean) {
 
 # Flash (disable runner's auto-monitor to avoid spurious error)
 if ($Flash) {
-    $flashArgs = @('flash','-d',$BuildDir,'--skip-monitor')
+    $flashArgs = @('flash','-d',$BuildDir)
     if ($Port) { $flashArgs += @('--esp-device',$Port) }
     & west @flashArgs
 }
+
 
 # Monitor: run from inside the build dir so west finds the config
 if ($Monitor) {

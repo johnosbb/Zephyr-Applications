@@ -1,14 +1,39 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
 / {
     aliases {
         led0 = &onboard_led;
+        sw0  = &user_button0;
+        ths0 = &sht40_sensor;
     };
 
     leds {
         compatible = "gpio-leds";
 
         onboard_led: led_0 {
-            gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
-            label = "GPIO-8 LED";
+            gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>; /* your LED pin */
+            label = "User LED";
         };
+    };
+
+    gpio_keys {
+        compatible = "gpio-keys";
+
+        user_button0: button_0 {
+            gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+            label = "User Button 0";
+        };
+    };
+};
+
+&i2c0 {
+    status = "okay";
+
+    sht40_sensor: sht40@44 {
+        compatible = "sensirion,sht4x";
+        reg = <0x44>;
+        label = "SHT40";
+        repeatability = <2>;  /* 0=low, 1=medium, 2=high */
+        status = "okay";
     };
 };
