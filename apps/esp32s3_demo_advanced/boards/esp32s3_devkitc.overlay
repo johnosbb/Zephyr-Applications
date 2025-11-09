@@ -20,10 +20,11 @@
         compatible = "gpio-keys";
 
         user_button0: button_0 {
-            gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+            gpios = <&gpio0 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
             label = "User Button 0";
         };
     };
+
 };
 
 &i2c0 {

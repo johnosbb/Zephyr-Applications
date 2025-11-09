@@ -1,0 +1,1 @@
+c:/users/johno/zephyr-sdk-0.17.4/xtensa-espressif_esp32s3_zephyr-elf/bin/xtensa-espressif_esp32s3_zephyr-elf-gdb.exe .\build\esp32s3_demo_advanced\zephyr\zephyr.elf
