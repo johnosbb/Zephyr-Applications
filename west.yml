@@ -10,13 +10,32 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
 
   projects:
+    # Main Zephyr repository for this workspace
     - name: zephyr
       remote: zephyrproject-rtos
       revision: main
       import:
-        # By using name-allowlist we can clone only the modules that are
-        # strictly needed by the application.
+
         name-allowlist:
-          - cmsis_6    # required by the ARM port for Cortex-M
-          - hal_nordic # required by the custom_plank board (Nordic based)
-          - hal_stm32  # required by the nucleo_f302r8 board (STM32 based)
+          - cmsis
+          - hal_xtensa
+          - hal_espressif
+          - hal
+
+
+    # Edge Impulse Zephyr SDK module
+    #
+    # This pulls the EI Zephyr module into:
+    #   applications/modules/edge-impulse-sdk-zephyr
+    #
+    # NOTE: SDK_VERSION should match the version specified in the
+    # `west.yml` that comes with your exported Zephyr library from
+    # Edge Impulse Studio (they use this pattern in their docs).
+    #
+    # For quick experimentation you can temporarily use `main`
+    # as the revision, but for real projects you should use the
+    # exact tag 
+    - name: edge-impulse-sdk-zephyr
+      path: modules/edge-impulse-sdk-zephyr
+      revision: ${SDK_VERSION}
+      url: https://github.com/edgeimpulse/edge-impulse-sdk-zephyr

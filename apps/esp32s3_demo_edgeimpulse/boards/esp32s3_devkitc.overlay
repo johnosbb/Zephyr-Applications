@@ -1,0 +1,161 @@
+/*
+ * Board overlay for ESP32-S3 Zephyr demo
+ *
+ * This file:
+ *  - Routes the Zephyr console (printk / printf) to the on-chip USB Serial/JTAG
+ *  - Defines aliases for LED, button, and SHT40 sensor
+ *  - Declares a GPIO-controlled LED
+ *  - Declares a GPIO button with internal pull-up (active low)
+ *  - Enables I2C0 and attaches an SHT40 temperature/humidity sensor
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+ / {
+    /*
+     * The "chosen" node tells Zephyr which hardware to use for certain
+     * core subsystems (console, shell, etc).
+     *
+     * Here we direct both the console and shell to the USB Serial/JTAG
+     * interface provided by the ESP32-S3. This is what appears as a
+     * USB CDC COM port on the host (e.g. COM12 on Windows).
+     */
+    chosen {
+        /* zephyr,console tells Zephyr where printk() and printf() go. */
+        zephyr,console = &usb_serial;
+
+        /*
+         * zephyr,shell-uart is optional, but useful if/when you enable
+         * the Zephyr shell. It routes the shell I/O over the same USB
+         * serial interface instead of a separate UART.
+         */
+        zephyr,shell-uart = &usb_serial;
+    };
+
+    /*
+     * "aliases" define convenient labels that application code can use
+     * via DT_ALIAS(...) and DT_ALIAS_NODE() macros.
+     *
+     * In your C code you use:
+     *   #define LED0_NODE DT_ALIAS(led0)
+     *   #define SW0_NODE  DT_ALIAS(sw0)
+     *   #define THS0_NODE DT_ALIAS(ths0)
+     *
+     * These map those names to the actual nodes declared below.
+     */
+    aliases {
+        led0 = &onboard_led;     /* Used by LED0_NODE in the app */
+        sw0  = &user_button0;    /* Used by SW0_NODE in the app */
+        ths0 = &sht40_sensor;    /* Used by THS0_NODE in the app */
+    };
+
+    /*
+     * "leds" container describes all LED devices on the board that are
+     * controlled via GPIOs.
+     *
+     * compatible = "gpio-leds" tells Zephyr to use the generic GPIO LED
+     * driver, so individual child nodes act as separate LEDs.
+     */
+    leds {
+        compatible = "gpio-leds";
+
+        /*
+         * onboard_led:
+         *   - Label "User LED" is just a human-readable name.
+         *   - gpios property encodes:
+         *       &gpio0       -> GPIO controller device (port 0)
+         *       8            -> pin number (GPIO0_8)
+         *       GPIO_ACTIVE_HIGH -> LED is on when pin is high
+         *
+         * This node is referenced by the "led0" alias above.
+         */
+        onboard_led: led_0 {
+            gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
+            label = "User LED";
+        };
+    };
+
+    /*
+     * "gpio_keys" describes buttons or keys connected via GPIO.
+     *
+     * compatible = "gpio-keys" tells Zephyr to treat each child as a
+     * simple momentary button/key with an associated GPIO.
+     */
+    gpio_keys {
+        compatible = "gpio-keys";
+
+        /*
+         * user_button0:
+         *   - gpios encodes:
+         *       &gpio0         -> GPIO controller device (port 0)
+         *       10             -> pin number (GPIO0_10)
+         *       GPIO_PULL_UP   -> enable internal pull-up resistor
+         *       GPIO_ACTIVE_LOW-> pressed = logic 0 (line pulled low)
+         *
+         *   - This assumes the button is wired between GPIO10 and GND:
+         *       idle: pull-up keeps the line high (button released)
+         *       pressed: line is shorted to GND, reads low (active)
+         *
+         * The "sw0" alias points to this node, which your code uses.
+         */
+        user_button0: button_0 {
+            gpios = <&gpio0 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "User Button 0";
+        };
+    };
+};
+
+/*
+ * &usb_serial:
+ *
+ * This is a reference to an existing node defined in the base board
+ * devicetree describing the on-chip USB Serial/JTAG peripheral.
+ *
+ * By setting status = "okay" we tell Zephyr to enable it as a device.
+ * Combined with zephyr,console = &usb_serial above, this makes printk
+ * output appear on the USB CDC COM port on your host.
+ */
+&usb_serial {
+    status = "okay";
+};
+
+/*
+ * &i2c0:
+ *
+ * This references the I2C controller node defined by the base board
+ * devicetree. Setting status = "okay" turns the peripheral on, and
+ * child nodes describe the devices attached to that I2C bus.
+ */
+&i2c0 {
+    status = "okay";
+
+    /*
+     * sht40_sensor:
+     *
+     * Child node on the I2C0 bus representing a Sensirion SHT40 sensor.
+     *
+     *  compatible   : binds this node to the SHT4x driver.
+     *  reg          : the I2C address (0x44 in this case).
+     *  label        : human-readable name, used by logging/tools.
+     *  repeatability: device-specific configuration (0,1,2 = low/med/high).
+     *  status       : "okay" means this sensor is present/enabled.
+     *
+     * The "ths0" alias points to this sensor, and your C code uses
+     * DEVICE_DT_GET(THS0_NODE) to get a handle to it.
+     */
+    sht40_sensor: sht40@44 {
+        compatible = "sensirion,sht4x";
+        reg = <0x44>;
+        label = "SHT40";
+        repeatability = <2>;  /* 0 = low, 1 = medium, 2 = high repeatability */
+        status = "okay";
+    };
+};
+
+/*
+ * Enable the on-chip Wi-Fi peripheral.
+ * The base DTS defines a &wifi node; here we just turn it on.
+ */
+&wifi {
+    status = "okay";
+};

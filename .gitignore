@@ -20,3 +20,6 @@ build/
 # Python venv, IDE
 .venv/
 .vscode/
+
+
+ei_config.h
