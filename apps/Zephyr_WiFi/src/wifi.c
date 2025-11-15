@@ -1,8 +1,7 @@
 /*
- * Copyright (c) 2023 Craig Peacock.
- * Copyright (c) 2017 ARM Ltd.
- * Copyright (c) 2016 Intel Corporation.
- *
+ * Static IPv4 WiFi example (ESP32-S3 + Zephyr)
+ * - Scans, connects, prints IPv4 (static), then ping/DNS/HTTP
+ * Based on code from  Craig Peacock Copyright (c) 2023
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -15,40 +14,21 @@
 #include <errno.h>
 #include <string.h>
 
-#include "ei_config.h"   /* SSID, WIFI_PASS */
+#include "ei_config.h"   /* defines WIFI_SSID, WIFI_PASS */
 #include "http_get.h"
 #include "ping.h"
 
+/* Only need this for Wi-Fi association */
 static K_SEM_DEFINE(wifi_connected, 0, 1);
-static K_SEM_DEFINE(ipv4_address_obtained, 0, 1);
 
 static struct net_mgmt_event_callback wifi_cb;
-static struct net_mgmt_event_callback ipv4_cb;
 
-/* Forward declarations for handlers used before definition */
+/* Forward declarations */
 static void handle_wifi_connect_result(struct net_mgmt_event_callback *cb);
 static void handle_wifi_disconnect_result(struct net_mgmt_event_callback *cb);
-static void handle_ipv4_result(struct net_if *iface);
 
 /* ------------------------------- Scan support -------------------------------- */
 static K_SEM_DEFINE(scan_done, 0, 1);
-
-static bool ipv4_is_configured(struct net_if *iface)
-{
-    struct net_if_ipv4 *ipv4 = iface->config.ip.ipv4;
-
-    for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
-        uint8_t type = ipv4->unicast[i].ipv4.addr_type;
-
-        if (type == NET_ADDR_DHCP || type == NET_ADDR_MANUAL) {
-            if (!net_ipv4_is_addr_unspecified(&ipv4->unicast[i].ipv4.address.in_addr)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 
 static void handle_wifi_scan_result(struct net_mgmt_event_callback *cb)
 {
@@ -73,14 +53,13 @@ static void handle_wifi_scan_done(struct net_mgmt_event_callback *cb)
 static void wifi_scan_and_print(void)
 {
     struct net_if *iface = net_if_get_default();
-    int ret;
 
     printk("Starting WiFi scan...\n");
-    ret = net_mgmt(NET_REQUEST_WIFI_SCAN, iface, NULL, 0);
-    if (ret) {
-        printk("Scan request failed (%d)\n", ret);
+    if (net_mgmt(NET_REQUEST_WIFI_SCAN, iface, NULL, 0)) {
+        printk("Scan request failed\n");
         return;
     }
+    /* Wait up to 10 s for scan to complete */
     if (k_sem_take(&scan_done, K_SECONDS(10)) != 0) {
         printk("Scan timed out\n");
     }
@@ -104,15 +83,12 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_WIFI_DISCONNECT_RESULT:
         handle_wifi_disconnect_result(cb);
         break;
-    case NET_EVENT_IPV4_ADDR_ADD:
-        handle_ipv4_result(iface);
-        break;
     default:
         break;
     }
 }
 
-/* -------------------------- Original helper handlers ------------------------- */
+/* ----------------------------- Helper functions ------------------------------ */
 static void handle_wifi_connect_result(struct net_mgmt_event_callback *cb)
 {
     const struct wifi_status *status = (const struct wifi_status *)cb->info;
@@ -120,7 +96,7 @@ static void handle_wifi_connect_result(struct net_mgmt_event_callback *cb)
     if (status->status) {
         printk("Connection request failed (%d)\n", status->status);
     } else {
-        printk("Connection request sent\n");
+        printk("Connected\n");
         k_sem_give(&wifi_connected);
     }
 }
@@ -137,86 +113,57 @@ static void handle_wifi_disconnect_result(struct net_mgmt_event_callback *cb)
     }
 }
 
-static void print_ipv4_info_now(struct net_if *iface)
+/* Print only statically configured IPv4 (no DHCP dependency) */
+static void print_ipv4_static_info(struct net_if *iface)
 {
-    for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
-        char buf[NET_IPV4_ADDR_LEN];
-        uint8_t type = iface->config.ip.ipv4->unicast[i].ipv4.addr_type;
+    struct net_if_ipv4 *ipv4 = iface->config.ip.ipv4;
 
-        if (type != NET_ADDR_DHCP && type != NET_ADDR_MANUAL) {
+    for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+        if (ipv4->unicast[i].ipv4.addr_type != NET_ADDR_MANUAL) {
+            continue;
+        }
+        if (net_ipv4_is_addr_unspecified(&ipv4->unicast[i].ipv4.address.in_addr)) {
             continue;
         }
 
-        printk("IPv4 address (%s): %s\n",
-               (type == NET_ADDR_DHCP) ? "DHCP" : "Static",
+        char buf[NET_IPV4_ADDR_LEN];
+
+        printk("IPv4 address (Static): %s\n",
                net_addr_ntop(AF_INET,
-                             &iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr,
+                             &ipv4->unicast[i].ipv4.address.in_addr,
                              buf, sizeof(buf)));
 
         printk("Subnet: %s\n",
                net_addr_ntop(AF_INET,
-                             &iface->config.ip.ipv4->unicast[i].netmask,
+                             &ipv4->unicast[i].netmask,
                              buf, sizeof(buf)));
 
         printk("Router: %s\n",
                net_addr_ntop(AF_INET,
-                             &iface->config.ip.ipv4->gw,
+                             &ipv4->gw,
                              buf, sizeof(buf)));
     }
-}
-
-
-
-static void handle_ipv4_result(struct net_if *iface)
-{
-    for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
-        char buf[NET_IPV4_ADDR_LEN];
-        uint8_t type = iface->config.ip.ipv4->unicast[i].ipv4.addr_type;
-
-        if (type != NET_ADDR_DHCP && type != NET_ADDR_MANUAL) {
-            continue;
-        }
-
-        printk("IPv4 address (%s): %s\n",
-               (type == NET_ADDR_DHCP) ? "DHCP" : "Static",
-               net_addr_ntop(AF_INET,
-                             &iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr,
-                             buf, sizeof(buf)));
-
-        printk("Subnet: %s\n",
-               net_addr_ntop(AF_INET,
-                             &iface->config.ip.ipv4->unicast[i].netmask,
-                             buf, sizeof(buf)));
-
-        printk("Router: %s\n",
-               net_addr_ntop(AF_INET,
-                             &iface->config.ip.ipv4->gw,
-                             buf, sizeof(buf)));
-    }
-
-    k_sem_give(&ipv4_address_obtained);
 }
 
 /* --------------------------------- API calls -------------------------------- */
 void wifi_connect(void)
 {
     struct net_if *iface = net_if_get_default();
-
     struct wifi_connect_req_params wifi_params = {0};
 
-    wifi_params.ssid = WIFI_SSID;
-    wifi_params.psk = WIFI_PASS;
+    wifi_params.ssid        = WIFI_SSID;
+    wifi_params.psk         = WIFI_PASS;
     wifi_params.ssid_length = strlen(WIFI_SSID);
-    wifi_params.psk_length = strlen(WIFI_PASS);
-    wifi_params.channel = WIFI_CHANNEL_ANY;
-    wifi_params.security = WIFI_SECURITY_TYPE_PSK;
-    wifi_params.band = WIFI_FREQ_BAND_2_4_GHZ;
-    wifi_params.mfp = WIFI_MFP_OPTIONAL;
+    wifi_params.psk_length  = strlen(WIFI_PASS);
+    wifi_params.channel     = WIFI_CHANNEL_ANY;
+    wifi_params.security    = WIFI_SECURITY_TYPE_PSK;
+    wifi_params.band        = WIFI_FREQ_BAND_2_4_GHZ;
+    wifi_params.mfp         = WIFI_MFP_OPTIONAL;
 
     printk("Wifi_Connect:Connecting to target SSID: %s\n", wifi_params.ssid);
 
     if (net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &wifi_params,
-                 sizeof(struct wifi_connect_req_params))) {
+                 sizeof(wifi_params))) {
         printk("WiFi Connection Request Failed\n");
     }
 }
@@ -227,8 +174,9 @@ void wifi_status(void)
     struct wifi_iface_status status = {0};
 
     if (net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status,
-                 sizeof(struct wifi_iface_status))) {
+                 sizeof(status))) {
         printk("WiFi Status Request Failed\n");
+        return;
     }
 
     printk("\n");
@@ -256,6 +204,9 @@ int main(void)
 {
     int sock;
     struct net_if *iface = net_if_get_default();
+    const char *host = "iot.beyondlogic.org";
+    const char *path = "/LoremIpsum.txt";
+    struct zsock_addrinfo *res = NULL;
 
     printk("WiFi Example\nBoard: %s\n", CONFIG_BOARD);
 
@@ -267,11 +218,7 @@ int main(void)
         NET_EVENT_WIFI_SCAN_RESULT |
         NET_EVENT_WIFI_SCAN_DONE);
 
-    net_mgmt_init_event_callback(&ipv4_cb, wifi_mgmt_event_handler,
-                                 NET_EVENT_IPV4_ADDR_ADD);
-
     net_mgmt_add_event_callback(&wifi_cb);
-    net_mgmt_add_event_callback(&ipv4_cb);
 
     wifi_scan_and_print();
     wifi_connect();
@@ -279,27 +226,32 @@ int main(void)
     k_sem_take(&wifi_connected, K_FOREVER);
     wifi_status();
 
-    print_ipv4_info_now(iface);
-
-    /* Only wait for IPv4 event if we don't already have one (DHCP case) */
-    if (!ipv4_is_configured(iface)) {
-        k_sem_take(&ipv4_address_obtained, K_FOREVER);
-        print_ipv4_info_now(iface); /* print once it arrives */
-    }
+    /* Static IPv4 is already configured by net_config, just print it now */
+    print_ipv4_static_info(iface);
 
     printk("Ready...\n\n");
 
+    /* Connectivity checks */
     ping("8.8.8.8", 4);
 
     printk("\nLooking up IP addresses:\n");
-    struct zsock_addrinfo *res;
-    nslookup("iot.beyondlogic.org", &res);
+    nslookup(host, &res);
     print_addrinfo_results(&res);
 
     printk("\nConnecting to HTTP Server:\n");
     sock = connect_socket(&res, 80);
-    http_get(sock, "iot.beyondlogic.org", "/LoremIpsum.txt");
-    zsock_close(sock);
+    if (sock >= 0) {
+        http_get(sock, (char *)host, (char *)path);
+        zsock_close(sock);
+    } else {
+        printk("Failed to connect to %s:80\n", host);
+    }
+
+    /* Free addrinfo results if allocated */
+    if (res) {
+        zsock_freeaddrinfo(res);
+        res = NULL;
+    }
 
     return 0;
 }

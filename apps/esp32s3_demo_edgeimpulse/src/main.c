@@ -41,13 +41,12 @@ static const struct device *const ths_dev =
  * Sampling / upload configuration
  * -------------------------------------------------------------------------- */
 
-/* DEBUG SETTINGS: fast to verify uploads.
- * Later you can set:
- *   #define SAMPLES_PER_HOUR   10
- *   #define SAMPLE_INTERVAL_MS (360U * 1000U)   // 6 minutes
+/* Sampling settings.
+ * One sample per upload; sampling interval defines samples/hour.
+ * With the current interval this yields ~10 uploads per hour.
  */
-#define SAMPLES_PER_HOUR          3
-#define SAMPLE_INTERVAL_MS        (5U * 1000U)
+#define SAMPLES_PER_HOUR          1
+#define SAMPLE_INTERVAL_MS        (360U * 1000U)    /* 6 minutes */
 
 /* Edge Impulse ingestion endpoint (HTTP) */
 #define EI_INGEST_HOST            "ingestion.edgeimpulse.com"
@@ -65,6 +64,10 @@ struct sample_entry {
 static struct sample_entry samples[SAMPLES_PER_HOUR];
 static int sample_count = 0;
 
+/* HTTP buffers kept static to avoid large stack frames */
+static char ei_body[2048];
+static char ei_req[4096];
+
 /* --------------------------------------------------------------------------
  * Label + JSON builder
  * -------------------------------------------------------------------------- */
@@ -72,17 +75,19 @@ static int sample_count = 0;
 static void make_label(char *buf, size_t len)
 {
     time_t now = time(NULL);
-    if (now == (time_t)-1) {
-        uint32_t up_s = k_uptime_get_32() / 1000U;
-        snprintk(buf, len, "session_%u", up_s);
-        return;
+    struct tm tm_buf;
+    struct tm *tm = NULL;
+
+    if (now != (time_t)-1) {
+        tm = gmtime_r(&now, &tm_buf);
     }
 
-    struct tm tm_buf;
-    struct tm *tm = gmtime_r(&now, &tm_buf);
-    if (!tm) {
+    /* If RTC time is not set (e.g. still 1970),
+     * fall back to an uptime-based session label.
+     */
+    if (!tm || (tm->tm_year + 1900) < 2020) {
         uint32_t up_s = k_uptime_get_32() / 1000U;
-        snprintk(buf, len, "session_%u", up_s);
+        snprintk(buf, len, "esp32s3_session_%u", up_s);
         return;
     }
 
@@ -171,8 +176,7 @@ static int upload_to_edge_impulse(const struct sample_entry *buf,
     printk("Uploading %d samples to Edge Impulse with label '%s'\n",
            count, label);
 
-    char body[2048];
-    int body_len = build_ei_json(body, sizeof(body), buf, count);
+    int body_len = build_ei_json(ei_body, sizeof(ei_body), buf, count);
     if (body_len < 0) {
         printk("Failed to build JSON body\n");
         return -1;
@@ -211,24 +215,24 @@ static int upload_to_edge_impulse(const struct sample_entry *buf,
 
     zsock_freeaddrinfo(res);
 
-    char req[4096];
-    int req_len = snprintk(req, sizeof(req),
+    int req_len = snprintk(ei_req, sizeof(ei_req),
                            "POST " EI_INGEST_PATH " HTTP/1.1\r\n"
                            "Host: " EI_INGEST_HOST "\r\n"
                            "Connection: close\r\n"
                            "x-api-key: " EI_API_KEY "\r\n"
                            "x-label: %s\r\n"
+                           "x-file-name: %s.json\r\n"
                            "Content-Type: application/json\r\n"
                            "Content-Length: %d\r\n"
                            "\r\n",
-                           label, body_len);
-    if (req_len < 0 || req_len >= (int)sizeof(req)) {
+                           label, label, body_len);
+    if (req_len < 0 || req_len >= (int)sizeof(ei_req)) {
         printk("Failed to build HTTP headers\n");
         zsock_close(sock);
         return -1;
     }
 
-    int sent = zsock_send(sock, req, req_len, 0);
+    int sent = zsock_send(sock, ei_req, req_len, 0);
     if (sent != req_len) {
         printk("Failed to send HTTP headers (sent=%d, expected=%d)\n",
                sent, req_len);
@@ -236,7 +240,7 @@ static int upload_to_edge_impulse(const struct sample_entry *buf,
         return -1;
     }
 
-    sent = zsock_send(sock, body, body_len, 0);
+    sent = zsock_send(sock, ei_body, body_len, 0);
     if (sent != body_len) {
         printk("Failed to send HTTP body (sent=%d, expected=%d)\n",
                sent, body_len);
@@ -245,12 +249,15 @@ static int upload_to_edge_impulse(const struct sample_entry *buf,
     }
 
     char resp[256];
-    int r = zsock_recv(sock, resp, sizeof(resp) - 1, 0);
-    if (r > 0) {
+    int r;
+
+    while ((r = zsock_recv(sock, resp, sizeof(resp) - 1, 0)) > 0) {
         resp[r] = '\0';
-        printk("EI response: %s\n", resp);
-    } else {
-        printk("EI recv returned %d\n", r);
+        printk("EI chunk: %s\n", resp);
+    }
+
+    if (r <= 0) {
+        printk("EI recv completed with r=%d\n", r);
     }
 
     zsock_close(sock);
@@ -308,10 +315,11 @@ int main(void)
         printk("WiFi connect() returned %d, waiting for IP...\n", ret);
         wifi_wait_for_ip_addr();
         printk("WiFi ready, continuing.\n");
+        printk("Sampling will auto-start; button toggles on/off.\n");
     }
 
     bool last_pressed = false;
-    bool sampling_enabled = false;
+    bool sampling_enabled = true;   /* auto-start sampling for bring-up */
     uint32_t last_sample_ms = 0;
 
     while (1) {
@@ -328,11 +336,11 @@ int main(void)
                     sample_count = 0;
                     last_sample_ms = k_uptime_get_32();
                     gpio_pin_set_dt(&led, 0);  /* LED off while sampling */
-                    printk("Sampling started\n");
+                    printk("Sampling started (button)\n");
                 } else {
                     sampling_enabled = false;
                     gpio_pin_set_dt(&led, 1);  /* LED on when stopped */
-                    printk("Sampling stopped\n");
+                    printk("Sampling stopped (button)\n");
                 }
             }
 
@@ -342,8 +350,8 @@ int main(void)
         if (sampling_enabled) {
             uint32_t now_ms = k_uptime_get_32();
 
-            if (sample_count == 0 ||
-                (now_ms - last_sample_ms) >= SAMPLE_INTERVAL_MS) {
+            /* Take a sample only once per interval */
+            if ((now_ms - last_sample_ms) >= SAMPLE_INTERVAL_MS) {
 
                 struct sensor_value temp, hum;
 

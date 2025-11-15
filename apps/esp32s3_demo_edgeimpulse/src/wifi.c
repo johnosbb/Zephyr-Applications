@@ -1,80 +1,74 @@
 #include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/net_event.h>
+#include <zephyr/net/net_ip.h>
 #include <zephyr/net/wifi_mgmt.h>
 
-// Event callbacks
+/* Semaphore signalled when Wi-Fi connect result arrives */
+static K_SEM_DEFINE(wifi_connected, 0, 1);
+
+/* Wi-Fi management callback */
 static struct net_mgmt_event_callback wifi_cb;
-static struct net_mgmt_event_callback ipv4_cb;
 
-// Semaphores
-static K_SEM_DEFINE(sem_wifi, 0, 1);
-static K_SEM_DEFINE(sem_ipv4, 0, 1);
-
-
+/* Last connection status from driver (0 = OK, otherwise error code) */
 static int wifi_connect_result = -1;
 
-
-
-// Called when the WiFi is connected
-static void on_wifi_connection_event(struct net_mgmt_event_callback *cb,
-                                     uint32_t mgmt_event,
-                                     struct net_if *iface)
+/* --------------------------- Event handler helpers -------------------------- */
+static void handle_wifi_connect_result(struct net_mgmt_event_callback *cb)
 {
-    printk("WiFi mgmt event: 0x%08x\n", mgmt_event);
-
     const struct wifi_status *status = (const struct wifi_status *)cb->info;
+    int s = status ? status->status : -1;
 
-    if (mgmt_event == NET_EVENT_WIFI_CONNECT_RESULT) {
-        printk("NET_EVENT_WIFI_CONNECT_RESULT, status=%d\n",
-               status ? status->status : -1);
+    wifi_connect_result = s;
 
-        if (status && status->status) {
-            printk("Error (%d): Connection request failed\r\n", status->status);
-        } else {
-            printk("Connected!\r\n");
-        }
-        wifi_connect_result = status ? status->status : -1;
-        k_sem_give(&sem_wifi);
-
-    } else if (mgmt_event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
-        printk("NET_EVENT_WIFI_DISCONNECT_RESULT\n");
-        if (status && status->status) {
-            printk("Error (%d): Disconnection request failed\r\n",
-                   status->status);
-        } else {
-            printk("Disconnected\r\n");
-            k_sem_take(&sem_wifi, K_NO_WAIT);
-        }
+    if (s) {
+        printk("WiFi connect result: error=%d\n", s);
+    } else {
+        printk("WiFi connect result: success\n");
     }
+
+    k_sem_give(&wifi_connected);
 }
 
-
-
-// Event handler for WiFi management events
-static void on_ipv4_obtained(struct net_mgmt_event_callback *cb,
-                             uint32_t mgmt_event,
-                             struct net_if *iface)
+static void handle_wifi_disconnect_result(struct net_mgmt_event_callback *cb)
 {
-    // Signal that the IP address has been obtained
-    if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
-        k_sem_give(&sem_ipv4);
+    const struct wifi_status *status = (const struct wifi_status *)cb->info;
+    int s = status ? status->status : 0;
+
+    if (s) {
+        printk("WiFi disconnect result: error=%d\n", s);
+    } else {
+        printk("WiFi disconnected\n");
+        k_sem_take(&wifi_connected, K_NO_WAIT);
     }
 }
 
-// Initialize the WiFi event callbacks
+/* Single net-mgmt event handler, like Zephyr_WiFi */
+static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
+                                    uint64_t mgmt_event,
+                                    struct net_if *iface)
+{
+    switch (mgmt_event) {
+    case NET_EVENT_WIFI_CONNECT_RESULT:
+        handle_wifi_connect_result(cb);
+        break;
+    case NET_EVENT_WIFI_DISCONNECT_RESULT:
+        handle_wifi_disconnect_result(cb);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Initialize Wi-Fi management callbacks */
 void wifi_init(void)
 {
-    // Initialize the event callbacks
     net_mgmt_init_event_callback(&wifi_cb,
-                                 on_wifi_connection_event,
-                                 NET_EVENT_WIFI_CONNECT_RESULT | NET_EVENT_WIFI_DISCONNECT_RESULT);
-    net_mgmt_init_event_callback(&ipv4_cb,
-                                 on_ipv4_obtained,
-                                 NET_EVENT_IPV4_ADDR_ADD);
-    
-    // Add the event callbacks
+                                 wifi_mgmt_event_handler,
+                                 NET_EVENT_WIFI_CONNECT_RESULT |
+                                 NET_EVENT_WIFI_DISCONNECT_RESULT);
     net_mgmt_add_event_callback(&wifi_cb);
-    net_mgmt_add_event_callback(&ipv4_cb);
 }
 
 int wifi_connect(char *ssid, char *psk)
@@ -91,11 +85,10 @@ int wifi_connect(char *ssid, char *psk)
     params.psk = (const uint8_t *)psk;
     params.psk_length = strlen(psk);
     params.security = WIFI_SECURITY_TYPE_PSK;
-    params.band = WIFI_FREQ_BAND_UNKNOWN;
+    params.band = WIFI_FREQ_BAND_2_4_GHZ;
     params.channel = WIFI_CHANNEL_ANY;
     params.mfp = WIFI_MFP_OPTIONAL;
 
-    /* Reset result */
     wifi_connect_result = -1;
 
     ret = net_mgmt(NET_REQUEST_WIFI_CONNECT,
@@ -103,75 +96,54 @@ int wifi_connect(char *ssid, char *psk)
                    &params,
                    sizeof(params));
     if (ret) {
-        printk("net_mgmt WIFI_CONNECT failed immediately: %d\r\n", ret);
+        printk("net_mgmt WIFI_CONNECT failed immediately: %d\n", ret);
         return ret;
     }
 
-    /* Wait up to 15 seconds for connect result */
-    if (k_sem_take(&sem_wifi, K_SECONDS(15)) != 0) {
-        printk("Timeout waiting for WiFi connect result\r\n");
+    /* Wait up to 15 seconds for connect result event */
+    if (k_sem_take(&wifi_connected, K_SECONDS(15)) != 0) {
+        printk("Timeout waiting for WiFi connect result\n");
         return -ETIMEDOUT;
     }
 
-    /* wifi_connect_result == 0 means success, non-zero == error code from driver */
     if (wifi_connect_result != 0) {
-        printk("WiFi connect failed with status=%d\r\n", wifi_connect_result);
+        printk("WiFi connect failed with status=%d\n", wifi_connect_result);
         return -wifi_connect_result;
     }
 
     return 0;
 }
 
-
-// Wait for IP address (blocking)
+/* Static IPv4 info print, similar to Zephyr_WiFi */
 void wifi_wait_for_ip_addr(void)
 {
-    struct wifi_iface_status status;
-    struct net_if *iface;
-    char ip_addr[NET_IPV4_ADDR_LEN];
-    char gw_addr[NET_IPV4_ADDR_LEN];
+    struct net_if *iface = net_if_get_default();
+    struct net_if_ipv4 *ipv4 = iface->config.ip.ipv4;
 
-    // Get interface
-    iface = net_if_get_default();
+    char buf[NET_IPV4_ADDR_LEN];
 
-    // Wait for the IPv4 address to be obtained
-    k_sem_take(&sem_ipv4, K_FOREVER);
+    for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+        if (ipv4->unicast[i].ipv4.addr_type != NET_ADDR_MANUAL) {
+            continue;
+        }
+        if (net_ipv4_is_addr_unspecified(&ipv4->unicast[i].ipv4.address.in_addr)) {
+            continue;
+        }
 
-    // Get the WiFi status
-    if (net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS,
-                 iface,
-                 &status,
-                 sizeof(struct wifi_iface_status))) {
-        printk("Error: WiFi status request failed\r\n");
-    }
+        printk("IPv4 address (Static): %s\n",
+               net_addr_ntop(AF_INET,
+                             &ipv4->unicast[i].ipv4.address.in_addr,
+                             buf, sizeof(buf)));
 
-    // Get the IP address
-    memset(ip_addr, 0, sizeof(ip_addr));
-    if (net_addr_ntop(AF_INET,
-                      &iface->config.ip.ipv4->unicast[0].ipv4.address.in_addr,
-                      ip_addr,
-                      sizeof(ip_addr)) == NULL) {
-        printk("Error: Could not convert IP address to string\r\n");
-    }
+        printk("Subnet: %s\n",
+               net_addr_ntop(AF_INET,
+                             &ipv4->unicast[i].netmask,
+                             buf, sizeof(buf)));
 
-    // Get the gateway address
-    memset(gw_addr, 0, sizeof(gw_addr));
-    if (net_addr_ntop(AF_INET,
-                      &iface->config.ip.ipv4->gw,
-                      gw_addr,
-                      sizeof(gw_addr)) == NULL) {
-        printk("Error: Could not convert gateway address to string\r\n");
-    }
-
-    // Print the WiFi status
-    printk("WiFi status:\r\n");
-    if (status.state >= WIFI_STATE_ASSOCIATED) {
-        printk("  SSID: %-32s\r\n", status.ssid);
-        printk("  Band: %s\r\n", wifi_band_txt(status.band));
-        printk("  Channel: %d\r\n", status.channel);
-        printk("  Security: %s\r\n", wifi_security_txt(status.security));
-        printk("  IP address: %s\r\n", ip_addr);
-        printk("  Gateway: %s\r\n", gw_addr);
+        printk("Router: %s\n",
+               net_addr_ntop(AF_INET,
+                             &ipv4->gw,
+                             buf, sizeof(buf)));
     }
 }
 
